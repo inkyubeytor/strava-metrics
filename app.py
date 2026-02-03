@@ -222,7 +222,7 @@ if is_authenticated():
                 sampling_distance = st.slider(
                     "📏 Sampling Distance (meters)",
                     min_value=1,
-                    max_value=50,
+                    max_value=500,
                     value=st.session_state.sampling_distance_m,
                     step=1,
                     help="Distance interval for sampling run data (smaller = more detailed)"

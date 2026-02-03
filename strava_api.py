@@ -360,11 +360,11 @@ class StravaAPIClient:
             # and the time taken is times[j] - times[i]
             for i in range(len(distances)):
                 for j in range(i + 1, len(distances)):
-                    distance_covered = round(distances[j] - distances[i], 2)
+                    distance_covered = ((distances[j] - distances[i]) // self.sampling_distance_mi) * self.sampling_distance_mi
                     time_taken = times[j] - times[i]
-                    
+
                     # Skip if distance is 0 or very small (less than 0.01 miles)
-                    if distance_covered <= 0.01:
+                    if distance_covered <= self.sampling_distance_mi:
                         continue
                     
                     # Update PB if this is faster (or first entry for this distance)
