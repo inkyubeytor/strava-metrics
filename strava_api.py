@@ -46,13 +46,17 @@ def format_time(seconds: int) -> str:
 class StravaAPIClient:
     """Client for interacting with Strava API."""
 
-    def __init__(self, access_token: str):
+    def __init__(self, access_token: str, sampling_distance_m: float = 5):
         """Initialize Strava API client.
         
         Args:
             access_token: Valid Strava API access token
+            sampling_distance_m: Sampling distance in meters for distance-indexed dataframe (default 5m)
         """
         self.access_token = access_token
+        self.sampling_distance_m = sampling_distance_m
+        self.sampling_distance_mi = sampling_distance_m / 1609.344  # Convert meters to miles
+        
         from strava_auth import StravaAuth
         
         # Create a minimal StravaAuth instance just for API calls
@@ -252,7 +256,7 @@ class StravaAPIClient:
         """Create time-indexed and distance-indexed dataframes across all runs.
         
         Time dataframe: sampled every second, records last distance before that second (in miles).
-        Distance dataframe: sampled every 0.01 miles, records first time that distance is passed.
+        Distance dataframe: sampled every N meters (configurable), records first time that distance is passed.
         
         Args:
             activities: List of activity dictionaries with Activity ID
@@ -292,12 +296,12 @@ class StravaAPIClient:
             
             all_time_data.append(time_resampled)
             
-            # DISTANCE DATAFRAME: resample every 0.01 miles
+            # DISTANCE DATAFRAME: resample every N meters (configurable)
             max_distance_mi = ts_sorted["distance_mi"].max()
             
-            # Create mile intervals (every 0.01 miles) to match distance_mi column type
+            # Create mile intervals based on sampling distance
             mile_intervals = pl.DataFrame({
-                "distance_mi": [i * 0.01 for i in range(0, int(max_distance_mi * 100) + 1)]
+                "distance_mi": [i * self.sampling_distance_mi for i in range(0, int(max_distance_mi / self.sampling_distance_mi) + 1)]
             })
             
             distance_resampled = (

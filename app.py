@@ -24,7 +24,7 @@ def format_time(seconds: int) -> str:
 
 
 def generate_run_names(activities_df: pl.DataFrame) -> dict:
-    """Generate run names with ISO 8601 dates and index for duplicates.
+    """Generate run names with dates and integer index by time of day for duplicates.
     
     Args:
         activities_df: DataFrame with activities
@@ -42,20 +42,22 @@ def generate_run_names(activities_df: pl.DataFrame) -> dict:
     )
     
     run_names = {}
-    date_index_map = {}
     
-    for row in activities_df.sort("Date").iter_rows(named=True):
+    # For each date with multiple runs, sort by time of day
+    for date in dates_with_multiples:
+        runs_on_date = activities_df.filter(
+            pl.col("Date").cast(pl.Date) == date
+        ).sort("Date")
+        
+        for idx, row in enumerate(runs_on_date.iter_rows(named=True), start=1):
+            activity_id = int(row["Activity ID"])
+            run_names[activity_id] = f"{date} {idx}"
+    
+    # For single runs on a date, just use the date
+    for row in activities_df.iter_rows(named=True):
         activity_id = int(row["Activity ID"])
-        date = row["Date"].date()
-        
-        if date not in date_index_map:
-            date_index_map[date] = 0
-        
-        date_index_map[date] += 1
-        
-        if date in dates_with_multiples:
-            run_names[activity_id] = f"{date} #{date_index_map[date]}"
-        else:
+        if activity_id not in run_names:
+            date = row["Date"].date()
             run_names[activity_id] = str(date)
     
     return run_names
@@ -76,6 +78,8 @@ if "access_token" not in st.session_state:
     st.session_state.access_token = None
 if "refresh_token" not in st.session_state:
     st.session_state.refresh_token = None
+if "sampling_distance_m" not in st.session_state:
+    st.session_state.sampling_distance_m = 5
 
 
 def handle_oauth_callback():
@@ -133,10 +137,7 @@ with st.sidebar:
         try:
             auth = load_strava_auth()
             auth_url = auth.get_auth_url()
-            st.markdown(
-                f"[🔗 Click here to connect with Strava]({auth_url})",
-                unsafe_allow_html=False,
-            )
+            st.link_button("🔗 Connect with Strava", auth_url, use_container_width=True)
         except ValueError as e:
             st.error(f"❌ Configuration error: {str(e)}")
             st.info(
@@ -155,8 +156,6 @@ if is_authenticated():
     
     # Fetch and display data
     try:
-        client = StravaAPIClient(st.session_state.access_token)
-        
         # Add refresh buttons in sidebar
         with st.sidebar:
             st.header("🔄 Refresh Data")
@@ -176,9 +175,12 @@ if is_authenticated():
         refresh_all = st.session_state.get("refresh_all", False)
         refresh_existing = st.session_state.get("refresh_existing", False)
         
+        # Create client for data fetching (without sampling distance)
+        fetch_client = StravaAPIClient(st.session_state.access_token, 5)
+        
         with st.spinner("📊 Fetching your Strava activities..."):
-            activities = client.get_activities()
-            activities_df = client.activities_to_dataframe(activities)
+            activities = fetch_client.get_activities()
+            activities_df = fetch_client.activities_to_dataframe(activities)
             
             if refresh_all or refresh_existing:
                 # Refresh all activity streams
@@ -186,12 +188,12 @@ if is_authenticated():
                 
                 if refresh_all:
                     st.info("Refreshing all activity streams...")
-                    clear_failed(client.failed_activities)
+                    clear_failed(fetch_client.failed_activities)
                 else:
                     st.info("Refreshing existing activity streams...")
                 
                 for activity_id in activities_df["Activity ID"].to_list():
-                    client.get_activity_timeseries(int(activity_id), force_refresh=True)
+                    fetch_client.get_activity_timeseries(int(activity_id), force_refresh=True)
                 
                 # Clear refresh flags
                 st.session_state.refresh_all = False
@@ -213,6 +215,23 @@ if is_authenticated():
                     min_value=min_date,
                     max_value=max_date,
                 )
+                
+                st.divider()
+                
+                # Sampling distance control
+                sampling_distance = st.slider(
+                    "📏 Sampling Distance (meters)",
+                    min_value=1,
+                    max_value=50,
+                    value=st.session_state.sampling_distance_m,
+                    step=1,
+                    help="Distance interval for sampling run data (smaller = more detailed)"
+                )
+                
+                st.session_state.sampling_distance_m = sampling_distance
+            
+            # Create client with current sampling distance for plots
+            client = StravaAPIClient(st.session_state.access_token, st.session_state.sampling_distance_m)
             
             # Filter data
             filtered_df = activities_df.filter(
@@ -224,7 +243,7 @@ if is_authenticated():
             filtered_df = filtered_df.filter(pl.col("Type") == "Run")
             
             # Calculate statistics
-            stats = client.get_stats_summary(filtered_df)
+            stats = fetch_client.get_stats_summary(filtered_df)
             
             # Metrics
             col1, col2, col3, col4 = st.columns(4)
@@ -266,7 +285,7 @@ if is_authenticated():
             st.markdown("---")
             
             # Charts
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             
             with col1:
                 st.subheader("📈 Distance Over Time")
@@ -288,8 +307,6 @@ if is_authenticated():
                 )
                 st.line_chart(daily_pace.to_pandas().set_index("Date"))
             
-            col3, col4 = st.columns(2)
-            
             with col3:
                 st.subheader("⏳ Activity Duration")
                 daily_duration = (
@@ -300,16 +317,6 @@ if is_authenticated():
                 )
                 st.bar_chart(daily_duration.to_pandas().set_index("Date"))
             
-            with col4:
-                st.subheader("🏔️ Elevation Gain")
-                daily_elevation = (
-                    filtered_df.select("Date", "Elevation (ft)")
-                    .group_by("Date")
-                    .agg(pl.col("Elevation (ft)").sum())
-                    .sort("Date")
-                )
-                st.area_chart(daily_elevation.to_pandas().set_index("Date"))
-            
             st.markdown("---")
             
             # Aggregate time and distance curves
@@ -318,127 +325,96 @@ if is_authenticated():
             with st.spinner("📈 Processing time and distance series..."):
                 time_df, distance_df = client.get_time_and_distance_dataframes(activities)
             
-            if time_df.height > 0:
-                # Plot time-indexed curves with Plotly
-                fig = go.Figure()
-                
-                # Group by activity and plot
-                for activity_id in time_df["activity_id"].unique().to_list():
-                    activity_data = time_df.filter(pl.col("activity_id") == activity_id).sort("second")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if time_df.height > 0:
+                    # Plot time-indexed curves with Plotly
+                    fig = go.Figure()
                     
-                    # Calculate deviation from linear pace
-                    seconds = activity_data["second"].to_list()
-                    distances = activity_data["distance_mi"].to_list()
+                    # Generate run names with dates
+                    run_names = generate_run_names(activities_df)
                     
-                    if len(seconds) > 1 and distances[-1] > 0:
-                        # Linear distance-time relationship
-                        avg_pace = distances[-1] / seconds[-1]  # miles per second
-                        linear_distances = [s * avg_pace for s in seconds]
+                    # Group by activity and plot
+                    for activity_id in time_df["activity_id"].unique().to_list():
+                        activity_data = time_df.filter(pl.col("activity_id") == activity_id).sort("second")
+                        run_name = run_names.get(activity_id, f"Run {activity_id}")
                         
-                        # Deviation from linear
-                        deviations = [d - linear_d for d, linear_d in zip(distances, linear_distances)]
+                        # Calculate deviation from linear pace
+                        seconds = activity_data["second"].to_list()
+                        distances = activity_data["distance_mi"].to_list()
+                        
+                        if len(seconds) > 1 and distances[-1] > 0:
+                            # Linear distance-time relationship
+                            avg_pace = distances[-1] / seconds[-1]  # miles per second
+                            linear_distances = [s * avg_pace for s in seconds]
+                            
+                            # Deviation from linear
+                            deviations = [d - linear_d for d, linear_d in zip(distances, linear_distances)]
+                            
+                            fig.add_trace(go.Scatter(
+                                x=seconds,
+                                y=deviations,
+                                mode="lines",
+                                name=run_name,
+                                opacity=0.7,
+                                hovertemplate="<b>Time:</b> %{x}s<br><b>Deviation:</b> %{y:.3f} mi<extra></extra>"
+                            ))
+                    
+                    fig.update_layout(
+                        title="Distance-Time Curve Deviation from Linear Pace",
+                        xaxis_title="Time (seconds)",
+                        yaxis_title="Deviation from Expected Distance (miles)",
+                        hovermode="x unified",
+                        height=600,
+                        template="plotly_white"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                if distance_df.height > 0:
+                    st.subheader("📊 All Activities - Distance vs Time")
+                    
+                    fig = go.Figure()
+                    
+                    # Generate run names with dates
+                    run_names = generate_run_names(activities_df)
+                    
+                    # Group by activity and plot
+                    for activity_id in distance_df["activity_id"].unique().to_list():
+                        activity_data = distance_df.filter(pl.col("activity_id") == activity_id).sort("distance_mi")
+                        run_name = run_names.get(activity_id, f"Run {activity_id}")
+                        
+                        # Convert seconds to HH:MM:SS for hover
+                        time_labels = [format_time(int(s)) for s in activity_data["elapsed_seconds"].to_list()]
                         
                         fig.add_trace(go.Scatter(
-                            x=seconds,
-                            y=deviations,
+                            x=activity_data["distance_mi"].to_list(),
+                            y=activity_data["elapsed_seconds"].to_list(),
                             mode="lines",
-                            name=f"Run {activity_id}",
+                            name=run_name,
                             opacity=0.7,
-                            hovertemplate="<b>Time:</b> %{x}s<br><b>Deviation:</b> %{y:.3f} mi<extra></extra>"
+                            hovertemplate="<b>%{fullData.name}</b><br><b>Distance:</b> %{x:.2f} mi<br><b>Time:</b> " + 
+                                          "<span>" + "</span>".join([f"%{{y}} ({t})" for t in time_labels]) + "<extra></extra>",
+                            customdata=time_labels,
                         ))
-                
-                fig.update_layout(
-                    title="Distance-Time Curve Deviation from Linear Pace",
-                    xaxis_title="Time (seconds)",
-                    yaxis_title="Deviation from Expected Distance (miles)",
-                    hovermode="x unified",
-                    height=600,
-                    template="plotly_white"
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            
-            st.markdown("---")
-            
-            # Distance over time scatter plot
-            st.subheader("📍 Distance Over Time - Scatter")
-            
-            fig = go.Figure()
-            
-            # Collect all data for scatter plot
-            dates = []
-            distances = []
-            names = []
-            
-            for activity_id in activities_df["Activity ID"].to_list():
-                activity_info = activities_df.filter(pl.col("Activity ID") == activity_id)
-                if activity_info.height > 0:
-                    dates.append(activity_info[0]["Date"][0])
-                    distances.append(activity_info[0]["Distance (mi)"][0])
-                    names.append(activity_info[0]["Name"][0])
-            
-            fig.add_trace(go.Scatter(
-                x=dates,
-                y=distances,
-                mode="markers",
-                marker=dict(size=8, opacity=0.7),
-                text=names,
-                hovertemplate="<b>%{text}</b><br><b>Date:</b> %{x|%Y-%m-%d}<br><b>Distance:</b> %{y:.2f} mi<extra></extra>",
-                showlegend=False
-            ))
-            
-            fig.update_layout(
-                title="Distance Over Time",
-                xaxis_title="Date",
-                yaxis_title="Distance (miles)",
-                hovermode="closest",
-                height=500,
-                template="plotly_white"
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            
-            if distance_df.height > 0:
-                st.subheader("📊 All Activities - Distance vs Time")
-                
-                fig = go.Figure()
-                
-                # Generate run names with dates
-                run_names = generate_run_names(activities_df)
-                
-                # Group by activity and plot
-                for activity_id in distance_df["activity_id"].unique().to_list():
-                    activity_data = distance_df.filter(pl.col("activity_id") == activity_id).sort("distance_mi")
-                    run_name = run_names.get(activity_id, f"Run {activity_id}")
                     
-                    # Convert seconds to HH:MM:SS for hover
-                    time_labels = [format_time(int(s)) for s in activity_data["elapsed_seconds"].to_list()]
-                    
-                    fig.add_trace(go.Scatter(
-                        x=activity_data["distance_mi"].to_list(),
-                        y=activity_data["elapsed_seconds"].to_list(),
-                        mode="lines",
-                        name=run_name,
-                        opacity=0.7,
-                        hovertemplate="<b>%{fullData.name}</b><br><b>Distance:</b> %{x:.2f} mi<br><b>Time:</b> " + 
-                                      "<span>" + "</span>".join([f"%{{y}} ({t})" for t in time_labels]) + "<extra></extra>",
-                        customdata=time_labels,
-                    ))
-                
-                fig.update_layout(
-                    title="Distance vs Time - All Runs",
-                    xaxis_title="Distance (miles)",
-                    yaxis_title="Time (seconds)",
-                    hovermode="x unified",
-                    height=600,
-                    template="plotly_white"
-                )
-                st.plotly_chart(fig, use_container_width=True)
+                    fig.update_layout(
+                        title="Distance vs Time - All Runs",
+                        xaxis_title="Distance (miles)",
+                        yaxis_title="Time (seconds)",
+                        hovermode="x unified",
+                        height=600,
+                        template="plotly_white"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
             
             st.markdown("---")
             
             # Personal best analysis
             st.subheader("🏃 Personal Best Analysis")
             
-            pb_df = client.compute_personal_best_times(activities)
+            pb_df = fetch_client.compute_personal_best_times(activities)
             
             if pb_df.height > 0:
                 col1, col2 = st.columns(2)
