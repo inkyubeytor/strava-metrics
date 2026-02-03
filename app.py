@@ -344,6 +344,10 @@ if is_authenticated():
                         seconds = activity_data["second"].to_list()
                         distances = activity_data["distance_mi"].to_list()
                         
+                        # Convert seconds to HH:MM:SS
+                        timestamp = activity_data.select(timestamp=pl.duration(seconds=pl.col("second")) + pl.datetime(1970,1,1,0,0,0)).get_column("timestamp")
+
+
                         if len(seconds) > 1 and distances[-1] > 0:
                             # Linear distance-time relationship
                             avg_pace = distances[-1] / seconds[-1]  # miles per second
@@ -353,7 +357,7 @@ if is_authenticated():
                             deviations = [d - linear_d for d, linear_d in zip(distances, linear_distances)]
                             
                             fig.add_trace(go.Scatter(
-                                x=seconds,
+                                x=timestamp,
                                 y=deviations,
                                 mode="lines",
                                 name=run_name,
@@ -363,11 +367,12 @@ if is_authenticated():
                     
                     fig.update_layout(
                         title="Distance-Time Curve Deviation from Linear Pace",
-                        xaxis_title="Time (seconds)",
+                        xaxis_title="Time",
                         yaxis_title="Deviation from Expected Distance (miles)",
                         hovermode="x unified",
                         height=600,
-                        template="plotly_white"
+                        template="plotly_white",
+                        xaxis_tickformat="%H:%M:%S"
                     )
                     st.plotly_chart(fig, use_container_width=True)
             
@@ -382,30 +387,28 @@ if is_authenticated():
                     
                     # Group by activity and plot
                     for activity_id in distance_df["activity_id"].unique().to_list():
-                        activity_data = distance_df.filter(pl.col("activity_id") == activity_id).sort("distance_mi")
+                        activity_data = distance_df.filter(pl.col("activity_id") == activity_id).sort("elapsed_seconds")
                         run_name = run_names.get(activity_id, f"Run {activity_id}")
-                        
-                        # Convert seconds to HH:MM:SS for hover
-                        time_labels = [format_time(int(s)) for s in activity_data["elapsed_seconds"].to_list()]
-                        
+
+                        # Convert seconds to HH:MM:SS
+                        timestamp = activity_data.select(timestamp=pl.duration(seconds=pl.col("elapsed_seconds")) + pl.datetime(1970,1,1,0,0,0)).get_column("timestamp")
+
                         fig.add_trace(go.Scatter(
-                            x=activity_data["distance_mi"].to_list(),
-                            y=activity_data["elapsed_seconds"].to_list(),
+                            x=timestamp,
+                            y=activity_data["distance_mi"].to_list(),
                             mode="lines",
                             name=run_name,
                             opacity=0.7,
-                            hovertemplate="<b>%{fullData.name}</b><br><b>Distance:</b> %{x:.2f} mi<br><b>Time:</b> " + 
-                                          "<span>" + "</span>".join([f"%{{y}} ({t})" for t in time_labels]) + "<extra></extra>",
-                            customdata=time_labels,
                         ))
                     
                     fig.update_layout(
-                        title="Distance vs Time - All Runs",
-                        xaxis_title="Distance (miles)",
-                        yaxis_title="Time (seconds)",
+                        title="Time vs Distance - All Runs",
+                        xaxis_title="Time",
+                        yaxis_title="Distance (miles)",
                         hovermode="x unified",
                         height=600,
-                        template="plotly_white"
+                        template="plotly_white",
+                        xaxis_tickformat="%H:%M:%S"
                     )
                     st.plotly_chart(fig, use_container_width=True)
             
